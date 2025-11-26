@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>價值投資</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    <!-- 引入 SortableJS 實現拖曳排序 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
+    
+    <!-- Firebase SDK -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, onSnapshot, updateDoc, arrayUnion, arrayRemove, collection } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        window.firebaseData = { db: null, auth: null, userId: null, isReady: false, mode: 'local', appId: appId, functions: { doc, setDoc, getDoc, onSnapshot, updateDoc, arrayUnion, arrayRemove, collection } };
+
+        async function initApp() {
+            try {
+                if (Object.keys(firebaseConfig).length > 0) {
+                    const app = initializeApp(firebaseConfig);
+                    const auth = getAuth(app);
+                    const db = getFirestore(app);
+                    window.firebaseData.auth = auth;
+                    window.firebaseData.db = db;
+
+                    onAuthStateChanged(auth, (user) => {
+                        if (user) {
+                            window.firebaseData.userId = user.uid;
+                            window.firebaseData.isReady = true;
+                            window.firebaseData.mode = 'firebase';
+                            document.dispatchEvent(new CustomEvent('auth-ready'));
+                        } else {
+                            if (initialAuthToken) signInWithCustomToken(auth, initialAuthToken);
+                            else signInAnonymously(auth);
+                        }
+                    });
+                } else { throw new Error("No Config"); }
+            } catch (e) {
+                console.warn("Firebase init failed, fallback to local:", e);
+                window.firebaseData.userId = 'local-user';
+                window.firebaseData.isReady = true;
+                window.firebaseData.mode = 'local';
+                document.dispatchEvent(new CustomEvent('auth-ready'));
+            }
+        }
+        initApp();
+    </script>
+
+    <style>
+        body { font-family: 'Inter', 'Microsoft JhengHei', sans-serif; background-color: #f0f2f5; padding-bottom: 80px; -webkit-tap-highlight-color: transparent; }
+        
+        /* Login Overlay */
+        #login-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #f9fafb; z-index: 9999; display: flex; justify-content: center; align-items: center; transition: opacity 0.3s ease-out; }
+        #login-overlay.hidden { display: none; opacity: 0; pointer-events: none; }
+
+        .bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; background: white; border-top: 1px solid #e5e7eb; display: flex; justify-content: space-around; padding-bottom: env(safe-area-inset-bottom); z-index: 50; }
+        .nav-item { flex: 1; padding: 10px 0; text-align: center; color: #9ca3af; font-size: 0.75rem; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .nav-item.active { color: #2563eb; font-weight: 600; }
+        .nav-icon { width: 24px; height: 24px; }
+        
+        .price-up { color: #ef4444; } .price-down { color: #10b981; } .price-flat { color: #374151; }
+        .bg-price-up { background-color: #fef2f2; color: #b91c1c; } .bg-price-down { background-color: #ecfdf5; color: #047857; }
+        
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .animate-spin-custom { animation: spin 1s linear infinite; }
+        
+        .sortable-ghost { opacity: 0.4; background: #f3f4f6; border: 2px dashed #d1d5db; }
+        .drag-handle { touch-action: none; }
+    </style>
+</head>
+<body>
+
+    <!-- 登入遮罩 -->
+    <div id="login-overlay">
+        <div class="w-full max-w-sm p-8 text-center bg-white rounded-2xl shadow-xl border border-gray-100 m-4">
+            <div class="bg-blue-50 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-6">
+                <i data-lucide="user-circle" class="w-10 h-10 text-blue-600"></i>
+            </div>
+            <h1 class="text-2xl font-bold text-gray-800 mb-2">價值投資看板</h1>
+            <p class="text-gray-500 text-sm mb-8">請輸入使用者名稱以同步您的自選股</p>
+            <div class="space-y-4">
+                <input type="text" id="login-input" placeholder="使用者名稱 (e.g. User1)" class="w-full px-4 py-3 border border-gray-300 rounded-xl text-lg text-center focus:ring-2 focus:ring-blue-500 outline-none">
+                <button onclick="handleLogin()" class="w-full bg-blue-600 text-white py-3.5 rounded-xl font-bold text-lg shadow-lg hover:bg-blue-700 transition active:scale-95">登入</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 主應用程式 -->
+    <div id="app-container" class="max-w-md mx-auto bg-gray-50 min-h-screen relative shadow-xl hidden">
+        <header class="bg-white sticky top-0 z-20 border-b border-gray-100 px-4 py-3 flex justify-between items-center shadow-sm">
+            <div class="flex flex-col">
+                <h1 class="text-xl font-bold text-gray-800 flex items-center gap-2">
+                    <i data-lucide="trending-up" class="w-6 h-6 text-blue-600"></i>
+                    價值投資
+                </h1>
+                <span class="text-xs text-blue-600 font-medium mt-0.5">Hi, <span id="header-username">...</span></span>
+            </div>
+            <div class="flex items-center gap-2">
+                <div id="header-status" class="text-[10px] px-2 py-1 bg-gray-100 text-gray-500 rounded font-mono">連線中...</div>
+                <button onclick="logoutUser()" class="text-gray-400 hover:text-red-500 p-1" title="登出"><i data-lucide="log-out" class="w-4 h-4"></i></button>
+            </div>
+        </header>
+
+        <main id="main-content" class="p-4 space-y-6">
+            <div class="flex flex-col items-center justify-center h-64 text-gray-400">
+                <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mb-2"></div>
+                <p>正在載入資料...</p>
+            </div>
+        </main>
+
+        <nav class="bottom-nav max-w-md mx-auto">
+            <button onclick="switchTab('hot')" class="nav-item active" id="nav-hot"><i data-lucide="flame" class="nav-icon"></i><span>熱門</span></button>
+            <button onclick="switchTab('watchlist')" class="nav-item" id="nav-watchlist"><i data-lucide="list" class="nav-icon"></i><span>自選</span></button>
+            <button onclick="switchTab('investors')" class="nav-item" id="nav-investors"><i data-lucide="users" class="nav-icon"></i><span>法人</span></button>
+            <button onclick="switchTab('valuation')" class="nav-item" id="nav-valuation"><i data-lucide="calculator" class="nav-icon"></i><span>估值</span></button>
+        </nav>
+    </div>
+
+    <script>
+        const PROXY_URL = "https://corsproxy.io/?";
+        const GOOGLE_SHEET_URLS = {
+            hot: "https://docs.google.com/spreadsheets/d/e/2PACX-1vSlig2sMWk07GvSGN110u6HpODhOwWp46zio3_z9cQ7N_p1IkkUCCDAnmQlt_CTP_cYjeMYlHxlI-c3/pub?gid=1445630995&single=true&output=csv", 
+            price: "https://docs.google.com/spreadsheets/d/e/2PACX-1vSlig2sMWk07GvSGN110u6HpODhOwWp46zio3_z9cQ7N_p1IkkUCCDAnmQlt_CTP_cYjeMYlHxlI-c3/pub?gid=0&single=true&output=csv",
+            investors: "https://docs.google.com/spreadsheets/d/e/2PACX-1vSlig2sMWk07GvSGN110u6HpODhOwWp46zio3_z9cQ7N_p1IkkUCCDAnmQlt_CTP_cYjeMYlHxlI-c3/pub?gid=820203922&single=true&output=csv",
+            tracking: "https://docs.google.com/spreadsheets/d/e/2PACX-1vSlig2sMWk07GvSGN110u6HpODhOwWp46zio3_z9cQ7N_p1IkkUCCDAnmQlt_CTP_cYjeMYlHxlI-c3/pub?gid=182793903&single=true&output=csv"
+        };
+
+        const STATE = {
+            tab: 'hot',
+            investorTab: '外資', 
+            username: null, 
+            watchlist: [], 
+            data: {
+                hot: [],
+                priceMap: {}, 
+                investors: {},
+                trackingMap: {}, 
+                updateTimes: { hot: '-', price: '-', investors: '-' }
+            },
+            sortable: null
+        };
+
+        // --- Data ---
+        async function fetchData(forceRefresh = false) {
+            if (forceRefresh) {
+                const icon = document.querySelector('#refresh-icon');
+                if(icon) icon.classList.add('animate-spin-custom');
+                const now = new Date();
+                const timeStr = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')} (已重整)`;
+                STATE.data.updateTimes.hot = timeStr;
+                STATE.data.updateTimes.price = timeStr;
+            }
+
+            const fetchOne = (key, url) => {
+                return new Promise(resolve => {
+                    if (!url) { resolve({ key, data: null }); return; }
+                    const t = forceRefresh ? `&t=${new Date().getTime()}` : '';
+                    const proxiedUrl = PROXY_URL + encodeURIComponent(url + t);
+                    Papa.parse(proxiedUrl, {
+                        download: true,
+                        complete: (res) => resolve({ key, data: res.data }),
+                        error: (err) => { console.warn(`Load ${key} error`, err); resolve({ key, data: null }); }
+                    });
+                });
+            };
+
+            const promises = Object.keys(GOOGLE_SHEET_URLS).map(key => fetchOne(key, GOOGLE_SHEET_URLS[key]));
+            const results = await Promise.all(promises);
+            results.forEach(res => { if (res && res.data) processData(res.key, res.data); });
+            
+            if (forceRefresh) {
+                setTimeout(() => {
+                    const icon = document.querySelector('#refresh-icon');
+                    if(icon) icon.classList.remove('animate-spin-custom');
+                    renderCurrentTab(); 
+                }, 500);
+            } else {
+                renderCurrentTab();
+            }
+        }
+
+        function processData(key, rawRows) {
+            if (!rawRows || rawRows.length < 2) return;
+            const cleanNum = (val) => parseFloat(String(val).replace(/,/g, '').trim()) || 0;
+            const cleanStr = (val) => String(val).trim();
+
+            if (key === 'hot') {
+                if(!STATE.data.updateTimes.hot.includes('重整') && rawRows[0] && rawRows[0][1]) STATE.data.updateTimes.hot = rawRows[0][1]; 
+                const list = [];
+                for (let i = 3; i < rawRows.length; i++) {
+                    const row = rawRows[i];
+                    if (!row[9] || row[9].includes('代號') || isNaN(parseFloat(row[8]))) continue; 
+                    list.push({
+                        rank: row[8], code: cleanStr(row[9]), name: cleanStr(row[10]), value: cleanStr(row[11]),
+                        price: cleanNum(row[12]), change: cleanNum(row[13]), pct: cleanNum(row[14].replace('%',''))
+                    });
+                    if (list.length >= 20) break;
+                }
+                STATE.data.hot = list;
+            } 
+            else if (key === 'price') {
+                const map = {};
+                if(!STATE.data.updateTimes.price.includes('重整')) STATE.data.updateTimes.price = STATE.data.updateTimes.hot;
+                for (let i = 1; i < rawRows.length; i++) {
+                    const row = rawRows[i];
+                    const code = cleanStr(row[0]);
+                    if (!code || code.includes('代號') || isNaN(parseFloat(code.substring(0,1)))) continue;
+                    map[code] = { code: code, name: cleanStr(row[1]), price: cleanNum(row[2]), change: row[3], pct: row[4], vol: row[11], val: row[12] };
+                }
+                STATE.data.priceMap = map;
+            } 
+            else if (key === 'investors') {
+                // 修正: 自動搜尋時間欄位 (找 H2, I2 或含有日期的格)
+                let foundTime = '-';
+                // 嘗試在 Row 0 或 Row 1 尋找含有 '資料時間' 或日期格式的字串
+                for(let r=0; r<2; r++) {
+                    if (!rawRows[r]) continue;
+                    for(let c=0; c<rawRows[r].length; c++) {
+                        const cell = rawRows[r][c] || '';
+                        // 如果這格是標題 "資料時間 ="，則取下一格
+                        if(cell.includes('資料時間') && rawRows[r][c+1]) {
+                            foundTime = rawRows[r][c+1];
+                            break;
+                        }
+                        // 或者直接找含有日期的格式 YYYY/MM/DD
+                        if(cell.match(/\d{4}\/\d{1,2}\/\d{1,2}\s+\d{1,2}:\d{2}/)) {
+                            foundTime = cell;
+                            break;
+                        }
+                    }
+                    if(foundTime !== '-') break;
+                }
+                STATE.data.updateTimes.investors = foundTime;
+
+                const parseBlock = (rStart, rEnd, cBuy, cSell) => {
+                    const buy = [], sell = [];
+                    for (let i = rStart; i <= rEnd; i++) {
+                        if (!rawRows[i]) continue;
+                        const rankBuy = rawRows[i][cBuy-1];
+                        if (rawRows[i][cBuy] && !isNaN(parseFloat(rankBuy))) {
+                            buy.push({ rank: rankBuy, code: cleanStr(rawRows[i][cBuy]), name: cleanStr(rawRows[i][cBuy+1]), val: cleanNum(rawRows[i][cBuy+2]) });
+                        }
+                        const rankSell = rawRows[i][cSell-1];
+                        if (rawRows[i][cSell] && !isNaN(parseFloat(rankSell))) {
+                            sell.push({ rank: rankSell, code: cleanStr(rawRows[i][cSell]), name: cleanStr(rawRows[i][cSell+1]), val: cleanNum(rawRows[i][cSell+2]) });
+                        }
+                    }
+                    return { buy, sell };
+                };
+                STATE.data.investors = { 
+                    '外資': parseBlock(3, 14, 1, 6), 
+                    '投信': parseBlock(16, 27, 1, 6), 
+                    '自營商': parseBlock(16, 27, 11, 16) 
+                };
+            } 
+            else if (key === 'tracking') {
+                const map = {};
+                for (let i = 3; i < rawRows.length; i++) {
+                    const row = rawRows[i];
+                    const code = cleanStr(row[0]);
+                    if (!code || code.includes('代碼')) continue;
+                    map[code] = { Code: code, Name: row[1], Broker: row[12] || '', Date: row[13] || '', Fair: cleanNum(row[19]), Dist: row[21], Low: cleanNum(row[18]), High: cleanNum(row[20]) };
+                }
+                STATE.data.trackingMap = map;
+            }
+        }
+
+        function formatNumber(num, fixed) {
+            if (num === null || num === undefined || isNaN(num)) return '-';
+            const val = Number(num);
+            if (fixed === undefined) fixed = Number.isInteger(val) ? 0 : 2;
+            return val.toLocaleString('en-US', { minimumFractionDigits: fixed, maximumFractionDigits: fixed });
+        }
+
+        function getPriceStyle(change) {
+            const val = typeof change === 'number' ? change : parseFloat(change) || 0;
+            if (val > 0) return { text: 'price-up', bg: 'bg-up-light', sign: '▲' };
+            if (val < 0) return { text: 'price-down', bg: 'bg-down-light', sign: '▼' };
+            return { text: 'price-flat', bg: 'bg-gray-100', sign: '' };
+        }
+
+        // --- Logic ---
+        function handleLogin() {
+            const input = document.getElementById('login-input');
+            const username = input.value.trim();
+            if (!username) { alert('請輸入使用者名稱'); return; }
+            STATE.username = username;
+            localStorage.setItem('invest_username', username);
+            document.getElementById('login-overlay').classList.add('hidden');
+            document.getElementById('app-container').classList.remove('hidden');
+            document.getElementById('header-username').textContent = username;
+            loadWatchlistFromCloud(username);
+            fetchData(); 
+        }
+
+        function checkAutoLogin() {
+            const savedUser = localStorage.getItem('invest_username');
+            if (savedUser) {
+                STATE.username = savedUser;
+                document.getElementById('login-overlay').classList.add('hidden');
+                document.getElementById('app-container').classList.remove('hidden');
+                document.getElementById('header-username').textContent = savedUser;
+                if (window.firebaseData.isReady) loadWatchlistFromCloud(savedUser);
+                else document.addEventListener('auth-ready', () => loadWatchlistFromCloud(savedUser));
+                fetchData();
+            }
+        }
+
+        window.logoutUser = () => {
+            STATE.username = null;
+            STATE.watchlist = [];
+            localStorage.removeItem('invest_username');
+            location.reload();
+        };
+
+        async function loadWatchlistFromCloud(username) {
+            const { isReady, db, functions, appId } = window.firebaseData;
+            if (!isReady || window.firebaseData.mode === 'local') {
+                const local = localStorage.getItem(`watchlist_${username}`);
+                if (local) STATE.watchlist = JSON.parse(local);
+                if(STATE.tab === 'watchlist') renderCurrentTab();
+                document.getElementById('header-status').textContent = '本機模式';
+                document.getElementById('header-status').className = 'text-[10px] px-2 py-1 bg-orange-100 text-orange-700 rounded font-mono';
+                return;
+            }
+            const docRef = functions.doc(db, 'artifacts', appId, 'public', 'data', 'watchlists', username);
+            functions.onSnapshot(docRef, (docSnap) => {
+                if (docSnap.exists()) STATE.watchlist = docSnap.data().codes || [];
+                else STATE.watchlist = [];
+                if(STATE.tab === 'watchlist' || STATE.tab === 'valuation') renderCurrentTab();
+                document.getElementById('header-status').textContent = '已連線';
+                document.getElementById('header-status').className = 'text-[10px] px-2 py-1 bg-green-100 text-green-700 rounded font-mono';
+            });
+        }
+
+        async function saveWatchlistToCloud(list) {
+            const { isReady, db, functions, appId } = window.firebaseData;
+            const username = STATE.username;
+            localStorage.setItem(`watchlist_${username}`, JSON.stringify(list));
+            if (!isReady || !username || window.firebaseData.mode === 'local') return;
+            const docRef = functions.doc(db, 'artifacts', appId, 'public', 'data', 'watchlists', username);
+            try { await functions.setDoc(docRef, { codes: list }, { merge: true }); } catch(e) { console.error(e); }
+        }
+
+        function initSortable() {
+            const el = document.getElementById('watchlist-container');
+            if (!el) return;
+            if (STATE.sortable) STATE.sortable.destroy();
+            STATE.sortable = Sortable.create(el, {
+                handle: '.drag-handle', 
+                animation: 150,
+                ghostClass: 'sortable-ghost',
+                onEnd: function (evt) {
+                    const newOrder = [];
+                    el.querySelectorAll('[data-code]').forEach(row => newOrder.push(row.getAttribute('data-code')));
+                    STATE.watchlist = newOrder;
+                    saveWatchlistToCloud(newOrder);
+                }
+            });
+        }
+
+        window.switchTab = (tab) => {
+            STATE.tab = tab;
+            document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+            document.getElementById(`nav-${tab}`).classList.add('active');
+            renderCurrentTab();
+        }
+
+        function renderCurrentTab() {
+            const container = document.getElementById('main-content');
+            container.innerHTML = ''; 
+            if (STATE.tab === 'hot') renderHot(container);
+            else if (STATE.tab === 'watchlist') renderWatchlist(container);
+            else if (STATE.tab === 'investors') renderInvestors(container);
+            else if (STATE.tab === 'valuation') renderValuation(container);
+            lucide.createIcons();
+        }
+
+        function renderHot(container) {
+            let html = `
+                <div class="flex justify-between items-center mb-3 px-1">
+                    <h2 class="text-lg font-bold text-gray-700">成交值排行 (前20)</h2>
+                    <div class="flex items-center gap-2">
+                        <span class="text-xs text-gray-500 font-medium text-gray-900/60">更新: ${STATE.data.updateTimes.hot}</span>
+                        <button onclick="fetchData(true)" class="text-gray-500 hover:text-blue-600 transition p-1 rounded-full hover:bg-gray-100" title="重新整理">
+                            <i data-lucide="rotate-cw" id="refresh-icon" class="w-4 h-4"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="space-y-3">
+            `;
+            if (STATE.data.hot.length === 0) { html += `<div class="text-center py-10 text-gray-400">載入中...</div>`; } else {
+                STATE.data.hot.forEach(item => {
+                    const style = getPriceStyle(item.change);
+                    html += `
+                        <div class="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex justify-between items-center relative overflow-hidden active:scale-[0.99] transition-transform" onclick="addToWatchlistDirect('${item.code}')">
+                            <div class="absolute left-0 top-0 bottom-0 w-1 bg-blue-500"></div>
+                            <div class="flex items-center gap-4 ml-2">
+                                <span class="text-xl font-bold text-gray-300 w-6 text-center font-mono">${item.rank}</span>
+                                <div><div class="font-bold text-gray-800 text-lg leading-tight">${item.name}</div><div class="text-xs text-gray-400 font-mono mt-0.5">${item.code}</div></div>
+                            </div>
+                            <div class="text-right">
+                                <div class="font-bold text-xl ${style.text}">${formatNumber(item.price, 2)}</div>
+                                <div class="text-xs font-medium ${style.text} flex items-center justify-end gap-1"><span>${style.sign}${formatNumber(Math.abs(item.change), 2)}</span><span>(${formatNumber(item.pct, 2)}%)</span></div>
+                                <div class="mt-1 bg-gray-50 px-1 rounded inline-block"><span class="text-xs text-gray-500">成交值 </span><span class="text-xs font-medium text-gray-700">${item.value}億</span></div>
+                            </div>
+                        </div>
+                    `;
+                });
+            }
+            html += '</div>';
+            container.innerHTML = html;
+        }
+
+        function renderWatchlist(container) {
+            let html = `
+                <div class="flex justify-between items-end mb-4 px-1">
+                    <h2 class="text-lg font-bold text-gray-700">我的追蹤標的</h2>
+                    <span class="text-xs text-gray-500 font-medium">更新: ${STATE.data.updateTimes.price}</span>
+                </div>
+                <div class="bg-white p-3 rounded-lg shadow-sm border border-gray-200 mb-6 flex gap-2">
+                    <input type="text" id="addInput" placeholder="輸入代號 (如 2330)" class="flex-1 bg-white border border-gray-200 rounded-lg px-4 py-3 shadow-sm outline-none focus:ring-2 focus:ring-blue-500 text-base">
+                    <button onclick="addFromInput()" class="bg-blue-600 text-white px-5 rounded-lg font-bold shadow-md hover:bg-blue-700 transition">加入</button>
+                </div>
+            `;
+            if (STATE.watchlist.length === 0) {
+                html += `<div class="text-center py-10 text-gray-400"><i data-lucide="folder-open" class="w-12 h-12 mx-auto mb-2"></i><p>尚無自選股</p></div>`;
+                container.innerHTML = html;
+            } else {
+                html += `<div id="watchlist-container" class="space-y-3">`;
+                STATE.watchlist.forEach(code => {
+                    const stock = STATE.data.priceMap[code] || { code, name: '載入中...', price: 0, change: 0, pct: '0%', val: '-' };
+                    const cleanChange = parseFloat(String(stock.change).replace(/[▲▼,]/g, '')) || 0;
+                    const style = getPriceStyle(cleanChange);
+                    const displayChange = Math.abs(cleanChange);
+                    html += `
+                        <div class="bg-white p-4 rounded-xl shadow-sm border border-gray-100 relative group touch-manipulation" data-code="${code}">
+                            <div class="drag-handle absolute top-4 left-4 text-gray-300 cursor-grab active:cursor-grabbing p-2 -ml-2 -mt-2"><i data-lucide="grip-vertical" class="w-5 h-5"></i></div>
+                            <button onclick="removeFromWatchlist('${code}')" class="absolute top-3 right-3 text-gray-300 hover:text-red-500"><i data-lucide="x" class="w-4 h-4"></i></button>
+                            <div class="flex justify-between items-end mb-2 pl-6">
+                                <div><div class="text-xl font-bold text-gray-900 leading-none">${stock.name}</div><div class="text-xs text-gray-400 font-mono mt-1">${stock.code}</div></div>
+                                <div class="text-right"><div class="text-2xl font-black ${style.text} tracking-tight">${formatNumber(stock.price, 2)}</div></div>
+                            </div>
+                            <div class="flex justify-between items-center pt-3 border-t border-gray-50 pl-2">
+                                <div class="flex flex-col"><span class="text-[10px] text-gray-400">總成交金額</span><span class="text-sm font-medium text-gray-600">${stock.val}億</span></div>
+                                <div class="flex items-center gap-3">
+                                    <div class="text-right"><div class="text-[10px] text-gray-400">漲跌</div><div class="text-sm font-bold ${style.text}">${style.sign}${formatNumber(displayChange, 2)}</div></div>
+                                    <div class="text-right"><div class="text-[10px] text-gray-400">幅度</div><div class="text-base font-bold ${style.text} px-2 py-0.5 rounded ${style.bg}">${stock.pct}</div></div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                });
+                html += `</div>`;
+                container.innerHTML = html;
+                initSortable();
+            }
+        }
+
+        window.setInvestorType = (type) => { STATE.investorTab = type; renderInvestors(document.getElementById('main-content')); }
+        function renderInvestors(container) {
+            const data = STATE.data.investors[STATE.investorTab];
+            let html = `
+                <div class="flex justify-between items-end mb-4 px-1">
+                    <h2 class="text-lg font-bold text-gray-700">三大法人動向</h2>
+                    <span class="text-xs text-gray-500 font-medium">更新: ${STATE.data.updateTimes.investors}</span>
+                </div>
+                <div class="bg-white p-1 rounded-lg shadow-sm border border-gray-200 flex mb-6">
+                    ${['外資', '投信', '自營商'].map(t => `
+                        <button onclick="setInvestorType('${t}')" class="flex-1 py-2 text-sm font-bold rounded-md transition ${STATE.investorTab === t ? 'bg-blue-600 text-white shadow' : 'text-gray-500 hover:bg-gray-50'}">${t}</button>
+                    `).join('')}
+                </div>
+            `;
+            if (!data || (!data.buy.length && !data.sell.length)) { html += `<div class="text-center text-gray-400 py-10">載入中...</div>`; } else {
+                const renderTable = (title, list, isBuy) => `
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden mb-4">
+                        <div class="px-4 py-2 bg-${isBuy ? 'red' : 'green'}-50 border-b border-${isBuy ? 'red' : 'green'}-100 font-bold text-${isBuy ? 'red' : 'green'}-700 flex items-center gap-2">
+                            <i data-lucide="${isBuy ? 'arrow-up-circle' : 'arrow-down-circle'}" class="w-4 h-4"></i>${title}
+                        </div>
+                        <div class="divide-y divide-gray-50">
+                            ${list.map((item, idx) => `
+                                <div class="flex justify-between items-center px-4 py-3 border-b border-gray-50 last:border-0 hover:bg-gray-50 transition">
+                                    <div class="flex items-center gap-3">
+                                        <span class="w-5 h-5 flex items-center justify-center bg-gray-100 text-gray-500 text-xs rounded-full font-mono">${item.rank || idx+1}</span>
+                                        <div><div class="font-bold text-gray-800 text-sm">${item.name}</div><div class="text-[10px] text-gray-400 font-mono">${item.code}</div></div>
+                                    </div>
+                                    <div class="font-mono font-bold ${isBuy ? 'text-red-500' : 'text-green-500'} text-sm tracking-tight">${formatNumber(item.val, 0)}</div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+                html += renderTable(`${STATE.investorTab} 買超前十`, data.buy || [], true);
+                html += renderTable(`${STATE.investorTab} 賣超前十`, data.sell || [], false);
+            }
+            container.innerHTML = html;
+        }
+
+        function renderValuation(container) {
+            let html = `<div class="flex justify-between items-end mb-4 px-1"><h2 class="text-lg font-bold text-gray-700">個股估值分析</h2></div>`;
+            const validItems = STATE.watchlist.filter(code => STATE.data.trackingMap[code]);
+            if (validItems.length === 0) {
+                 html += `<div class="text-center py-12 text-gray-400"><i data-lucide="search-x" class="w-12 h-12 mx-auto mb-3 text-gray-300"></i><p>自選股中無對應估值資料</p></div>`;
+            } else {
+                html += `<div class="space-y-4">`;
+                validItems.forEach(code => {
+                    const track = STATE.data.trackingMap[code];
+                    const market = STATE.data.priceMap[code] || { name: track.Name, price: 0 };
+                    const distVal = parseFloat(String(track.Dist).replace('%', ''));
+                    const isExpensive = distVal < 0; 
+                    const colorClass = isExpensive ? 'text-green-600' : 'text-red-600';
+                    const barColor = isExpensive ? 'bg-green-500' : 'bg-red-500';
+                    const statusText = isExpensive ? '昂貴 (高於預估)' : '便宜 (低於預估)';
+                    const barWidth = Math.min(Math.max(Math.abs(distVal) * 1.5, 10), 100);
+
+                    html += `
+                        <div class="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
+                            <div class="flex justify-between items-start mb-2">
+                                <div><h3 class="text-xl font-bold text-gray-800">${track.Name}</h3><span class="text-xs text-gray-400 font-mono">${code}</span></div>
+                                <div class="text-right"><div class="text-xs text-gray-400 mb-0.5">距離合理價</div><div class="text-xl font-black font-mono ${colorClass}">${track.Dist}</div></div>
+                            </div>
+                            <div class="flex flex-col items-center justify-center my-4 py-2 border-y border-dashed border-gray-200 bg-gray-50/50 rounded-lg">
+                                <span class="text-[10px] text-gray-400 uppercase tracking-widest mb-1">合理價預估</span>
+                                <span class="text-3xl font-black text-gray-800 tracking-tight">${formatNumber(track.Fair, 2)}</span>
+                                <span class="text-xs font-bold ${colorClass} mt-1">${statusText}</span>
+                            </div>
+                            <div class="w-full bg-gray-100 rounded-full h-2 mb-2 overflow-hidden"><div class="${barColor} h-2 rounded-full transition-all duration-500" style="width: ${barWidth}%"></div></div>
+                            <div class="flex justify-between text-xs text-gray-400"><span class="font-mono">低: ${formatNumber(track.Low, 0)}</span><span class="font-mono">高: ${formatNumber(track.High, 0)}</span></div>
+                            <div class="grid grid-cols-2 gap-2 pt-3">
+                                <div class="bg-gray-50 p-2 rounded text-center"><div class="text-[10px] text-gray-400">券商</div><div class="text-sm font-bold text-gray-700">${track.Broker || '-'}</div></div>
+                                <div class="bg-gray-50 p-2 rounded text-center"><div class="text-[10px] text-gray-400">報告日</div><div class="text-sm font-bold text-gray-700">${track.Date || '-'}</div></div>
+                            </div>
+                        </div>
+                    `;
+                });
+                html += `</div>`;
+            }
+            container.innerHTML = html;
+        }
+
+        // --- Fix: Add Stock Logic ---
+        // 修正：現在會即時更新 STATE.watchlist 並重新渲染，確保視覺上有反應
+        window.addToWatchlist = (code) => {
+            if (STATE.watchlist.includes(code)) return;
+            // 立即更新本地狀態和 UI
+            const newW = [...STATE.watchlist, code];
+            STATE.watchlist = newW;
+            
+            // 觸發儲存 (非同步)
+            saveWatchlistToCloud(newW);
+            
+            // 立即重新渲染當前頁面
+            renderCurrentTab();
+        };
+        
+        window.addToWatchlistDirect = (code) => { window.addToWatchlist(code); alert(`已加入 ${code}！`); };
+        window.addFromInput = () => { const c = document.getElementById('addInput').value.trim(); if(c) { window.addToWatchlist(c); document.getElementById('addInput').value = ''; }};
+        window.removeFromWatchlist = (code) => {
+            const newW = STATE.watchlist.filter(c => c !== code);
+            STATE.watchlist = newW;
+            saveWatchlistToCloud(newW);
+            renderCurrentTab();
+        };
+
+        window.onload = () => {
+            checkAutoLogin();
+            fetchData();
+            lucide.createIcons();
+            document.getElementById('login-input').addEventListener('keypress', (e) => { if (e.key === 'Enter') handleLogin(); });
+        };
+    </script>
+</body>
+</html>
